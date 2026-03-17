@@ -1,0 +1,216 @@
+# Imports
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+# Generate Ground Truth Data
+def vdp(t, z, mu):
+    x, y = z
+    return [y, mu*(1 - x**2)*y - x]
+
+mu = 0
+z0 = [2.0, 0.0]
+t_span = (0, 20)
+t_eval = np.linspace(*t_span, 2000)
+
+sol = solve_ivp(vdp, t_span, z0, t_eval=t_eval, args=(mu,), rtol=1e-10, atol=1e-12)
+t = torch.tensor(sol.t, dtype=torch.float32).view(-1,1).to(device)
+z = torch.tensor(sol.y.T, dtype=torch.float32).to(device)
+
+
+# Dataset
+X_time = t
+X_ic = torch.tensor(z0, dtype=torch.float32).to(device).repeat(len(t),1)
+X_full = torch.cat([X_time, X_ic], dim=1)
+Y = z
+
+
+# 1. Baseline Neural Network
+class BaselineNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3,128), nn.Tanh(),
+            nn.Linear(128,128), nn.Tanh(),
+            nn.Linear(128,2)
+        )
+    def forward(self,x):
+        return self.net(x)
+
+
+# 2. ResNet Time-Stepper
+class ResBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim,dim),
+            nn.Tanh(),
+            nn.Linear(dim,dim)
+        )
+    def forward(self,x):
+        return x + self.net(x)
+
+class ResNetStepper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = nn.Linear(2,128)
+        self.blocks = nn.Sequential(*[ResBlock(128) for _ in range(4)])
+        self.out = nn.Linear(128,2)
+    def forward(self,z0,steps,dt):
+        z = z0
+        traj = [z]
+        for _ in range(steps-1):
+            h = torch.tanh(self.embed(z))
+            dz = self.out(self.blocks(h))
+            z = z + dt*dz
+            traj.append(z)
+        return torch.stack(traj)
+
+
+# 3. Neural ODE
+class ODEFunc(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(2,128), nn.Tanh(),
+            nn.Linear(128,128), nn.Tanh(),
+            nn.Linear(128,2)
+        )
+    def forward(self,t,z):
+        return self.net(z)
+
+try:
+    from torchdiffeq import odeint
+    HAS_ODE = True
+except:
+    HAS_ODE = False
+
+
+# 4. PINN
+class PINN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1,128), nn.Tanh(),
+            nn.Linear(128,128), nn.Tanh(),
+            nn.Linear(128,2)
+        )
+    def forward(self,t):
+        return self.net(t)
+
+def pinn_residual(model, t):
+    t.requires_grad_(True)
+    z = model(t)
+    x = z[:,0:1]
+    y = z[:,1:2]
+
+    dx = torch.autograd.grad(x, t, torch.ones_like(x), create_graph=True)[0]
+    dy = torch.autograd.grad(y, t, torch.ones_like(y), create_graph=True)[0]
+
+    res1 = dx - y
+    res2 = dy - (mu*(1 - x**2)*y - x)
+    return res1, res2
+
+
+# Training Utility
+def train_model(model, loss_fn, inputs, targets=None, epochs=2000, lr=1e-3):
+    opt = optim.Adam(model.parameters(), lr=lr)
+    for ep in range(epochs):
+        opt.zero_grad()
+        pred = model(*inputs) if isinstance(inputs, tuple) else model(inputs)
+        loss = loss_fn(pred, targets) if targets is not None else loss_fn(pred)
+        loss.backward()
+        opt.step()
+        if ep % 500 == 0:
+            print(f"Epoch {ep} | Loss {loss.item():.3e}")
+    return model
+
+mse = nn.MSELoss()
+
+
+# Train Baseline NN
+baseline = BaselineNN().to(device)
+baseline = train_model(baseline, mse, X_full, Y)
+
+
+# Train ResNet Stepper
+resnet = ResNetStepper().to(device)
+dt = float(t[1]-t[0])
+steps = len(t)
+
+def resnet_loss(pred, true):
+    return mse(pred.squeeze(), true)
+
+resnet = train_model(
+    resnet,
+    resnet_loss,
+    inputs=(torch.tensor(z0,dtype=torch.float32).to(device),steps,dt),
+    targets=Y
+)
+
+
+# Train Neural ODE
+if HAS_ODE:
+    func = ODEFunc().to(device)
+    opt = optim.Adam(func.parameters(), lr=1e-3)
+    for ep in range(2000):
+        opt.zero_grad()
+        z_pred = odeint(func, torch.tensor(z0,dtype=torch.float32).to(device), t.squeeze())
+        loss = mse(z_pred, Y)
+        loss.backward()
+        opt.step()
+        if ep % 500 == 0:
+            print(f"NeuralODE Epoch {ep} | Loss {loss.item():.3e}")
+
+
+# Train PINN
+pinn = PINN().to(device)
+
+def pinn_loss(_):
+    z_pred = pinn(t)
+    data_loss = mse(z_pred, Y)
+    r1, r2 = pinn_residual(pinn, t)
+    phys_loss = torch.mean(r1**2) + torch.mean(r2**2)
+    return data_loss + phys_loss
+
+pinn = train_model(pinn, pinn_loss, inputs=t, targets=None)
+
+
+# Evaluation
+with torch.no_grad():
+    z_base = baseline(X_full)
+    z_res  = resnet(torch.tensor(z0,dtype=torch.float32).to(device),steps,dt)
+    z_pinn = pinn(t)
+
+    if HAS_ODE:
+        z_ode = odeint(func, torch.tensor(z0,dtype=torch.float32).to(device), t.squeeze())
+
+def rmse(a,b): return torch.sqrt(torch.mean((a-b)**2)).item()
+
+print("\nRMSE vs Ground Truth")
+print("Baseline NN:", rmse(z_base,Y))
+print("ResNet:", rmse(z_res.squeeze(),Y))
+print("PINN:", rmse(z_pinn,Y))
+if HAS_ODE:
+    print("Neural ODE:", rmse(z_ode,Y))
+
+
+# Plots
+plt.figure()
+plt.plot(Y[:,0].cpu(), Y[:,1].cpu(), label="True")
+plt.plot(z_base[:,0].cpu(), z_base[:,1].cpu(), '--', label="Baseline")
+plt.plot(z_res[:,0].cpu(), z_res[:,1].cpu(), '--', label="ResNet")
+plt.plot(z_pinn[:,0].cpu(), z_pinn[:,1].cpu(), '--', label="PINN")
+if HAS_ODE:
+    plt.plot(z_ode[:,0].cpu(), z_ode[:,1].cpu(), '--', label="NeuralODE")
+plt.legend()
+plt.title("Phase Portrait Comparison")
+plt.xlabel("x")
+plt.ylabel("y")
+plt.show()
