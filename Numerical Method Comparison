@@ -1,0 +1,134 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+
+# van der Pol System Definition
+def vdp(t, z, mu):
+    x, y = z
+    dxdt = y
+    dydt = mu * (1 - x**2) * y - x
+    return [dxdt, dydt]
+
+
+# Fixed-Step Explicit Euler
+def euler(f, t_span, z0, h, mu):
+    t0, tf = t_span
+    # Adjusted to ensure t does not exceed tf
+    t = np.arange(t0, tf + h/2, h)
+    z = np.zeros((len(t), len(z0)))
+    z[0] = z0
+
+    for i in range(len(t)-1):
+        z[i+1] = z[i] + h * np.array(f(t[i], z[i], mu))
+    return t, z
+
+# Fixed-Step RK4
+def rk4(f, t_span, z0, h, mu):
+    t0, tf = t_span
+    # Adjusted to ensure t does not exceed tf
+    t = np.arange(t0, tf + h/2, h)
+    z = np.zeros((len(t), len(z0)))
+    z[0] = z0
+
+    for i in range(len(t)-1):
+        ti = t[i]
+        zi = z[i]
+        k1 = np.array(f(ti, zi, mu))
+        k2 = np.array(f(ti + h/2, zi + h*k1/2, mu))
+        k3 = np.array(f(ti + h/2, zi + h*k2/2, mu))
+        k4 = np.array(f(ti + h, zi + h*k3, mu))
+        z[i+1] = zi + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
+    return t, z
+
+
+# Simulation Settings
+mu = 5.0                 # try mu=0.5 (non-stiff) vs mu=10 (stiff)
+z0 = [2.0, 0.0]
+t_span = (0, 20)
+h = 0.01
+
+
+# Solve with Methods
+
+# Euler
+t_eu, z_eu = euler(vdp, t_span, z0, h, mu)
+
+# RK4
+t_rk4, z_rk4 = rk4(vdp, t_span, z0, h, mu)
+
+# Adaptive RK45 (non-stiff solver)
+sol_rk45 = solve_ivp(vdp, t_span, z0, args=(mu,), method='RK45', rtol=1e-8, atol=1e-10)
+
+# Implicit BDF (stiff solver)
+sol_bdf = solve_ivp(vdp, t_span, z0, args=(mu,), method='BDF', rtol=1e-8, atol=1e-10)
+
+
+# Interpolate to common grid
+t_ref = t_rk4
+from scipy.interpolate import interp1d
+
+interp_rk45 = interp1d(sol_rk45.t, sol_rk45.y)
+interp_bdf  = interp1d(sol_bdf.t,  sol_bdf.y)
+
+z_rk45 = interp_rk45(t_ref).T
+z_bdf  = interp_bdf(t_ref).T
+
+
+# Error vs RK4 (reference)
+def rms_error(a, b):
+    return np.sqrt(np.mean((a - b)**2))
+
+err_eu   = rms_error(z_eu, z_rk4)
+err_rk45 = rms_error(z_rk45, z_rk4)
+err_bdf  = rms_error(z_bdf, z_rk4)
+
+print("RMS Errors vs RK4:")
+print(f"Euler: {err_eu:.3e}")
+print(f"RK45:  {err_rk45:.3e}")
+print(f"BDF:   {err_bdf:.3e}")
+
+
+# Plot Trajectories
+plt.figure()
+plt.plot(t_eu, z_eu[:,0], label="Euler")
+plt.plot(t_rk4, z_rk4[:,0], label="RK4")
+plt.plot(sol_rk45.t, sol_rk45.y[0], '--', label="RK45")
+plt.plot(sol_bdf.t, sol_bdf.y[0], '--', label="BDF")
+plt.xlabel("Time")
+plt.ylabel("x(t)")
+plt.title(f"Van der Pol Oscillator (mu={mu})")
+plt.legend()
+plt.show()
+
+
+# Plot Phase Portrait
+plt.figure()
+plt.plot(z_eu[:,0], z_eu[:,1], label="Euler")
+plt.plot(z_rk4[:,0], z_rk4[:,1], label="RK4")
+plt.plot(sol_rk45.y[0], sol_rk45.y[1], '--', label="RK45")
+plt.plot(sol_bdf.y[0], sol_bdf.y[1], '--', label="BDF")
+plt.xlabel("x")
+plt.ylabel("y")
+plt.title("Phase Portrait")
+plt.legend()
+plt.show()
+
+
+# Test Step Size Stability
+hs = [0.2, 0.1, 0.05, 0.01]
+errors = []
+
+for h_test in hs:
+    _, z_test = rk4(vdp, t_span, z0, h_test, mu)
+    t_test = np.arange(t_span[0], t_span[1] + h_test/2, h_test)
+    interp_test = interp1d(t_test, z_test.T)
+    z_test_interp = interp_test(t_ref).T
+    errors.append(rms_error(z_test_interp, z_rk4))
+
+plt.figure()
+plt.loglog(hs, errors, marker='o')
+plt.xlabel("Step size")
+plt.ylabel("RMS Error")
+plt.title("RK4 Convergence")
+plt.gca().invert_xaxis()
+plt.show()
