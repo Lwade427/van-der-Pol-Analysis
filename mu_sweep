@@ -1,0 +1,44 @@
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.signal import find_peaks
+import matplotlib.pyplot as plt
+
+def vdp(t, z, mu):
+    x, y = z
+    return [y, mu*(1-x**2)*y - x]
+
+def analyze_mu(mu):
+    sol = solve_ivp(vdp, (0, 100), [2,0], args=(mu,), dense_output=True)
+    t = np.linspace(50,100,5000)   # steady-state only
+    z = sol.sol(t)
+    x = z[0]
+
+    amp = (np.max(x) - np.min(x)) / 2
+
+    peaks, _ = find_peaks(x)
+    if len(peaks) > 1:
+        period = np.mean(np.diff(t[peaks]))
+    else:
+        period = np.nan
+
+    return amp, period
+
+mus = np.linspace(0.1, 20, 25)
+amps, periods = [], []
+
+for mu in mus:
+    a, p = analyze_mu(mu)
+    amps.append(a)
+    periods.append(p)
+
+plt.figure()
+plt.plot(mus, amps)
+plt.xlabel("mu"); plt.ylabel("Limit Cycle Amplitude")
+plt.title("Amplitude vs Nonlinearity")
+plt.show()
+
+plt.figure()
+plt.plot(mus, periods)
+plt.xlabel("mu"); plt.ylabel("Period")
+plt.title("Period vs Nonlinearity")
+plt.show()
