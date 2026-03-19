@@ -1,0 +1,91 @@
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+
+# Define Van der Pol oscillator
+def vdp(t, z, mu):
+    x, y = z
+    return [y, mu*(1 - x**2)*y - x]
+
+# List of stiffnesses (μ)
+mus = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
+
+# Simulation settings
+z0 = [2.0, 0.0]
+t_span = (0, 20)
+t_eval = np.linspace(*t_span, 2000)
+dt = t_eval[1]-t_eval[0]
+
+# Store RMSEs
+rmse_base = []
+rmse_res  = []
+rmse_pinn = []
+rmse_ode  = []
+
+# Loop over μ values
+for mu_val in mus:
+    # Ground truth
+    sol = solve_ivp(vdp, t_span, z0, t_eval=t_eval, args=(mu_val,), rtol=1e-10, atol=1e-12)
+    t = torch.tensor(sol.t, dtype=torch.float32).view(-1,1).to(device)
+    Y = torch.tensor(sol.y.T, dtype=torch.float32).to(device)
+    
+    # Prepare dataset for Baseline NN
+    X_time = t
+    X_ic = torch.tensor(z0, dtype=torch.float32).to(device).repeat(len(t),1)
+    X_full = torch.cat([X_time, X_ic], dim=1)
+    
+    # Train Baseline NN
+    baseline = BaselineNN().to(device)
+    baseline = train_model(baseline, mse, X_full, Y, epochs=1000, lr=1e-3)
+    
+    # Train ResNet Stepper
+    resnet = ResNetStepper().to(device)
+    steps = len(t)
+    resnet = train_model(resnet, resnet_loss, inputs=(torch.tensor(z0,dtype=torch.float32).to(device),steps,dt), targets=Y, epochs=1000)
+    
+    # Train PINN
+    pinn = PINN().to(device)
+    pinn = train_model(pinn, pinn_loss, inputs=t, targets=None, epochs=1000)
+    
+    # Train Neural ODE if available
+    if HAS_ODE:
+        func = ODEFunc().to(device)
+        opt = torch.optim.Adam(func.parameters(), lr=1e-3)
+        for ep in range(1000):
+            opt.zero_grad()
+            z_pred = odeint(func, torch.tensor(z0,dtype=torch.float32).to(device), t.squeeze())
+            loss = mse(z_pred, Y)
+            loss.backward()
+            opt.step()
+    
+    # Evaluate RMSE
+    with torch.no_grad():
+        z_base = baseline(X_full)
+        z_res  = resnet(torch.tensor(z0,dtype=torch.float32).to(device),steps,dt)
+        z_pinn = pinn(t)
+        if HAS_ODE:
+            z_ode  = odeint(func, torch.tensor(z0,dtype=torch.float32).to(device), t.squeeze())
+        
+        # RMSE in x(t) only
+        rmse_base.append(torch.sqrt(torch.mean((z_base[:,0]-Y[:,0])**2)).item())
+        rmse_res.append(torch.sqrt(torch.mean((z_res[:,0].squeeze()-Y[:,0])**2)).item())
+        rmse_pinn.append(torch.sqrt(torch.mean((z_pinn[:,0]-Y[:,0])**2)).item())
+        if HAS_ODE:
+            rmse_ode.append(torch.sqrt(torch.mean((z_ode[:,0]-Y[:,0])**2)).item())
+
+
+# Plot RMSE vs μ
+plt.figure(figsize=(8,5))
+plt.plot(mus, rmse_base, 'o-', label="Baseline NN")
+plt.plot(mus, rmse_res, 's-', label="ResNet Stepper")
+plt.plot(mus, rmse_pinn, '^-', label="PINN")
+if HAS_ODE:
+    plt.plot(mus, rmse_ode, 'd-', label="Neural ODE")
+
+plt.xlabel("Stiffness μ")
+plt.ylabel("RMSE in x(t)")
+plt.title("RMSE vs Stiffness for ML Methods")
+plt.legend()
+plt.grid(True)
+plt.show()

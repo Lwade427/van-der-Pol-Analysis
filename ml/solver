@@ -201,7 +201,7 @@ if HAS_ODE:
     print("Neural ODE:", rmse(z_ode,Y))
 
 
-# Plots
+# Phase Portrait Plots
 plt.figure()
 plt.plot(Y[:,0].cpu(), Y[:,1].cpu(), label="True")
 plt.plot(z_base[:,0].cpu(), z_base[:,1].cpu(), '--', label="Baseline")
@@ -213,4 +213,27 @@ plt.legend()
 plt.title("Phase Portrait Comparison")
 plt.xlabel("x")
 plt.ylabel("y")
+plt.show()
+
+
+# Plot x(t) vs time 
+plt.figure(figsize=(10,5))
+Y=Y.detach()
+t=t.detach()
+# Ground truth
+plt.plot(t.cpu().numpy(), Y[:,0].detach().cpu().numpy(), label="Ground Truth", linewidth=2)
+
+# ML predictions
+plt.plot(t.cpu().numpy(), z_base[:,0].detach().cpu().numpy(), '--', label="Baseline NN")
+plt.plot(t.cpu().numpy(), z_res[:,0].detach().cpu().numpy(), '--', label="ResNet Stepper")
+plt.plot(t.cpu().numpy(), z_pinn[:,0].detach().cpu().numpy(), '--', label="PINN")
+
+if HAS_ODE:
+    plt.plot(t.cpu().numpy(), z_ode[:,0].detach().cpu().numpy(), '--', label="Neural ODE")
+
+plt.xlabel("Time t")
+plt.ylabel("x(t)")
+plt.title("x(t) vs Time: ML Methods Comparison")
+plt.legend()
+plt.grid(True)
 plt.show()

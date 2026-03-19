@@ -1,0 +1,80 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from scipy.interpolate import interp1d
+
+# Van der Pol system
+def vdp(t, z, mu):
+    x, y = z
+    dxdt = y
+    dydt = mu*(1 - x**2)*y - x
+    return [dxdt, dydt]
+
+# Fixed-step RK4
+def rk4(f, t_span, z0, h, mu):
+    t0, tf = t_span
+    t = np.arange(t0, tf + h/2, h)
+    z = np.zeros((len(t), len(z0)))
+    z[0] = z0
+    for i in range(len(t)-1):
+        ti, zi = t[i], z[i]
+        k1 = np.array(f(ti, zi, mu))
+        k2 = np.array(f(ti + h/2, zi + h*k1/2, mu))
+        k3 = np.array(f(ti + h/2, zi + h*k2/2, mu))
+        k4 = np.array(f(ti + h, zi + h*k3, mu))
+        z[i+1] = zi + (h/6)*(k1 + 2*k2 + 2*k3 + k4)
+    return t, z
+
+# RMS error
+def rms_error(a, b):
+    return np.sqrt(np.mean((a-b)**2))
+
+# Parameters
+z0 = [2.0, 0.0]
+t_span = (0, 50)
+h = 0.01
+mu_vals = np.linspace(0.5, 20, 20)  # sweep from weakly to strongly nonlinear
+
+err_euler = []
+err_rk45 = []
+err_bdf = []
+
+# Sweep over mu
+for mu in mu_vals:
+    # Reference RK4 solution
+    t_rk4, z_rk4 = rk4(vdp, t_span, z0, h, mu)
+
+    # Euler
+    t_eu = np.arange(t_span[0], t_span[1] + h/2, h)
+    z_eu = np.zeros((len(t_eu), len(z0)))
+    z_eu[0] = z0
+    for i in range(len(t_eu)-1):
+        z_eu[i+1] = z_eu[i] + h*np.array(vdp(t_eu[i], z_eu[i], mu))
+
+    # Adaptive RK45
+    sol_rk45 = solve_ivp(vdp, t_span, z0, args=(mu,), method='RK45', rtol=1e-8, atol=1e-10)
+    interp_rk45 = interp1d(sol_rk45.t, sol_rk45.y)
+    z_rk45 = interp_rk45(t_rk4).T
+
+    # Implicit BDF
+    sol_bdf = solve_ivp(vdp, t_span, z0, args=(mu,), method='BDF', rtol=1e-8, atol=1e-10)
+    interp_bdf = interp1d(sol_bdf.t, sol_bdf.y)
+    z_bdf = interp_bdf(t_rk4).T
+
+    # Compute RMS errors vs RK4
+    err_euler.append(rms_error(z_eu, z_rk4))
+    err_rk45.append(rms_error(z_rk45, z_rk4))
+    err_bdf.append(rms_error(z_bdf, z_rk4))
+
+# Plot RMS error vs mu
+plt.figure(figsize=(8,5))
+plt.plot(mu_vals, err_euler, 'o-', label="Euler")
+plt.plot(mu_vals, err_rk45, 's-', label="RK45")
+plt.plot(mu_vals, err_bdf, '^-', label="BDF")
+plt.xlabel("Nonlinearity μ")
+plt.ylabel("RMS Error vs RK4")
+plt.title("Numerical Error vs Nonlinearity in Van der Pol Oscillator")
+plt.yscale("log")
+plt.grid(True, which="both", ls="--")
+plt.legend()
+plt.show()
